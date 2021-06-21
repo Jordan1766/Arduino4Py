@@ -1,15 +1,16 @@
 import serial  # 引用 pySerial 模組
 import time
 
-COM_PORT = 'COM4'       # 指定通訊埠
+# COM_PORT = 'COM4'       # 指定通訊埠
+COM_PORT = 'COM4'       # 指定藍芽通訊埠
 BAUD_RATES = 115200     # 設定傳輸速率(鮑率)
 ser = None
 
 try:
     ser = serial.Serial(COM_PORT, BAUD_RATES)   # 初始化通訊埠
     while True:
-        # data_row = str(random.randint(0, 100)) + '#'   # '\n'表示結束符號
-        data_row = str(input('請輸入欲傳送的數字:')) + '#'
+        # data_row = str(input('請輸入欲傳送的數字:')) + '#' # '#'表示結束符號
+        data_row = str(input('請輸入欲傳送的數字:')) + '\n'  # '\n'表示結束符號
 
         data = data_row.encode()
         ser.write(data)
