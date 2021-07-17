@@ -1,0 +1,333 @@
+/*
+ * Arduino GUI
+ * Arduino 智慧家庭
+ * LCD 螢幕資料
+ * ----------------
+ * R:1 28.30,89.00  (接收自Python)
+ * 756,20.10,57.00  (回應給Python)
+ * ----------------
+ * 接收指令
+ * R:1 -> D2
+ * G:2 -> D3
+ * S:4 -> D4 (紅:+5, 橘:D4, 咖:GND)
+ * Python 傳送指定數值可以控制設備
+ * 傳送過來的值要顯示在 LCD 上
+ * Buzeer => GND -> GND
+ *           I/O -> D6
+ *           VCC -> +5V
+ * BUTTON => D7
+ * -------------------------------------------
+ * 傳送資料
+ * CDS => GND  -> GND 
+ *        VCC  -> +5V
+ *        SIG  -> A3
+ *
+ * DHT => GND  -> GND
+ *        DATA -> 5
+ *        VCC  -> +5V
+ *        
+*/
+#include <Servo.h>
+#include <Wire.h>
+#include <LCD.h>
+#include <LiquidCrystal_I2C.h>
+#include <Thread.h>
+#include <DHT.h>
+#include <SPI.h>
+#include <RFID.h>
+
+#define CDS_PIN   A3
+#define SDA_PIN   10
+#define RST_PIN    9
+#define RELAY_PIN  8
+#define BUTTON_PIN 7
+#define BUZEER_PIN 6
+#define DHT_PIN    5
+#define SERVO_PIN  4
+#define GREEN_PIN  3
+#define RED_PIN    2
+
+#define DHT_TYPE   DHT11
+#define I2C_ADDR   0x27
+
+Thread Serial_Thread = Thread();
+Thread Hardware_Thread = Thread();
+Thread DHT_Thread = Thread();
+Thread CDS_Thread = Thread();
+Thread RFID_Thread = Thread();
+Servo myservo;
+DHT dht(DHT_PIN, DHT_TYPE);//初始化 dht
+LiquidCrystal_I2C lcd(I2C_ADDR, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
+RFID rfid(SDA_PIN, RST_PIN);
+
+unsigned char keyA[16]{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xff, 0x07, 0x80, 0x69, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+unsigned char readData[16];
+int key_blockId = 11;
+int data_blockId = 9;
+
+String str = "";
+int command_len = 0;
+bool update_flag = false;
+int control = 0;
+int minControl = 0;
+int maxControl = 255;
+int openDegree = 100;
+int closeDegree = 15;
+int nowDegree = closeDegree;
+int cdsValue = 0;
+float humi = 0;
+float temp = 0;
+float py_humi = 0;
+float py_temp = 0;
+
+void playCDS()
+{
+  cdsValue = analogRead(CDS_PIN);
+}
+
+void responseData()
+{
+  Serial.print(cdsValue);
+  Serial.print(",");
+  Serial.print(temp);
+  Serial.print(",");
+  Serial.print(humi);
+  Serial.print(",");
+  Serial.println(control);
+  //LCD
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+  lcd.setCursor(0, 1);
+  lcd.print(cdsValue);
+  lcd.print(",");
+  lcd.print(temp);
+  lcd.print(",");
+  lcd.print(humi);
+}
+
+void playBuzzer()
+{
+  if(control & 16)
+  {
+    tone(BUZEER_PIN, 2500, 50);
+    if(digitalRead(BUTTON_PIN) == LOW)
+    {
+      control = control ^ 16;
+      update_flag = true;
+    }    
+  }
+}
+
+void playDHT11()
+{
+  float h = dht.readHumidity(); // 濕度
+  float t = dht.readTemperature(false); // 溫度 true: 華氏, false(預設): 攝氏
+  if(isnan(h) || isnan(t)) 
+  { // nan -> not a number
+    delay(500);
+    return;
+  }
+  humi = h;
+  // 溫度 delta 調整
+  temp = t;
+}
+
+void closeDoor()
+{
+  //Serial.println("close");
+  for (int i = nowDegree; i >= closeDegree; i -= 5)
+  {
+    myservo.write(i);
+    nowDegree = i;
+    delay(50);
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+}
+
+void openDoor()
+{
+  //Serial.println("open");
+  
+  for (int i = nowDegree; i <= openDegree; i += 5)
+  {
+    myservo.write(i);
+    nowDegree = i;
+    delay(50);
+    digitalWrite(RELAY_PIN, LOW);
+  }
+}
+
+void display_LCD()
+{
+  lcd.setCursor(2, 0);
+  lcd.print("                ");
+  lcd.setCursor(2, 0);
+  lcd.print(control);
+  lcd.setCursor(4, 0);
+  lcd.print(py_temp);
+  lcd.print(",");
+  lcd.print(py_humi);
+  update_flag = false;
+}
+
+void action_Hardware()
+{
+  responseData();
+  if(update_flag)
+    display_LCD();
+  digitalWrite(RED_PIN, control & 1);
+  digitalWrite(GREEN_PIN, control & 2);
+  playBuzzer();
+  if(control & 4)
+  {
+    openDoor();
+  }
+  else
+  {
+    closeDoor();
+  }
+}
+
+void listenSerial()
+{
+  while(Serial.available())
+  {
+    char c = Serial.read();
+    if((c == '\n') || (c == '#'))//結束字元 '\n' 或 '#'
+    {
+      if(command_len > 7)
+      {
+        String tmp_str = "";
+        if((str[0] == 't') && (str[1] == 'e') && (str[2] == 'm') && (str[3] == 'p'))
+        {
+          for(int i = 4; i < command_len; i++)
+          {
+            tmp_str += str[i];
+          }
+          py_temp = tmp_str.toFloat();
+          update_flag = true;
+        }
+        if((str[0] == 'h') && (str[1] == 'u') && (str[2] == 'm') && (str[3] == 'i'))
+        {
+          for(int i = 4; i < command_len; i++)
+          {
+            tmp_str += str[i];
+          }
+          py_humi = tmp_str.toFloat();
+          update_flag = true;
+        }
+      }
+      else
+      {
+        int tmpControl = str.toInt();
+        if(tmpControl >= minControl && tmpControl <= maxControl)
+        {
+          //Serial.println(tmpControl);
+          update_flag = true;
+          if(tmpControl == 0)
+            control = 0;
+          else if(tmpControl < 8)
+            control = control ^ tmpControl;
+          else if(tmpControl == 8)
+            control = control & 3;
+          else if(tmpControl == 9)
+            control = 7;
+          else if(tmpControl == 16)
+            control = control | tmpControl;
+        }
+      }
+      str = "";
+      command_len = 0;
+    }
+    else
+    {
+      str += c;
+      command_len++;
+    }
+  }
+}
+
+void LCD_Init()
+{
+  lcd.begin(16, 2);
+  lcd.setBacklight(HIGH);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("R:0  0.00,0.00");
+}
+
+void playRFID()
+{
+  if(rfid.isCard() && rfid.readCardSerial())
+  {
+    tone(BUZEER_PIN, 976, 200);
+    //偵測到卡, 可讀狀態
+    String cardId = "";
+    char chr[2];
+    for(int i = 0; i < 5; i++)
+    {
+      sprintf(chr, "%02x",rfid.serNum[i]);
+      cardId += chr;//組合ID內容
+    }
+    control = control ^ 4;
+    update_flag = true;
+  }
+  rfid.halt();
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  SPI.begin();
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT);
+  pinMode(BUZEER_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(RED_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
+  
+  rfid.init();
+  
+  LCD_Init();
+  
+  dht.begin(); // 啟動 dht
+  
+  myservo.attach(SERVO_PIN);//設定 Servo 訊號腳位
+  myservo.write(closeDegree);//0 ~ 180
+  
+  Serial_Thread.onRun(listenSerial);
+  Serial_Thread.setInterval(100);
+  Hardware_Thread.onRun(action_Hardware);
+  Hardware_Thread.setInterval(1000);
+  DHT_Thread.onRun(playDHT11);
+  DHT_Thread.setInterval(100);
+  CDS_Thread.onRun(playCDS);
+  CDS_Thread.setInterval(100);
+  RFID_Thread.onRun(playRFID);
+  RFID_Thread.setInterval(1000);
+  delay(1000);
+}
+
+void loop()
+{
+  if(Serial_Thread.shouldRun())
+  {
+    Serial_Thread.run();
+  }
+  if(Hardware_Thread.shouldRun())
+  {
+    Hardware_Thread.run();
+  }
+  if(DHT_Thread.shouldRun())
+  {
+    DHT_Thread.run();
+  }
+  if(CDS_Thread.shouldRun())
+  {
+    CDS_Thread.run();
+  }
+  if(RFID_Thread.shouldRun() && (update_flag == false))
+  {
+    RFID_Thread.run();
+  }
+}
